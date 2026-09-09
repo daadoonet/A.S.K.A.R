@@ -1,0 +1,34 @@
+{
+  "wifi_networks": [
+    {
+      "title": "وای‌فای بخش ۱",
+      "ssid": "Office-Staff",
+      "password": "your_secure_password_here",
+      "guide": "مخصوص همکاران بخش ۱"
+    },
+    {
+      "title": "وای‌فای بخش ۲",
+      "ssid": "Secondary-Staff",
+      "password": "your_other_password_here",
+      "guide": "مخصوص همکاران بخش ۲"
+    }
+  ],
+  "faq_troubleshooting": [
+    {
+      "topic": "قطعی اینترنت و شبکه",
+      "keywords": ["اینترنت", "وایفای", "وای‌فای", "قطع", "شبکه"],
+      "diagnostic_steps": [
+        "بررسی فیزیکی کابل شبکه و چراغ پورت LAN",
+        "بررسی خاموش بودن پروکسی یا VPN"
+      ],
+      "reply_template": "سلام! اول چک کن وای‌فای روتر روشنه یا نه، یه بار قطع و وصل کن و VPN رو ببند."
+    }
+  ],
+  "quick_qa": [
+    {
+      "question": "آدرس سامانه احراز هویت چیست؟",
+      "answer": "برای ریست پسورد به سامانه auth.domain.ir مراجعه کنید."
+    }
+  ]
+}
+

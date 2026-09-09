@@ -1,0 +1,38 @@
+# Secrets, Keys & Configurations
+.env
+.env.*
+!.env.example
+credentials*.json
+client_secret*.json
+token*.json
+knowledge_base.json
+
+# Databases & SQLite files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Application Logs
+*.log
+logs/
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+ENV/
+
+# IDE & Editor Metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
