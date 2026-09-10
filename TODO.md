@@ -23,6 +23,7 @@
 - [x] **Telegram Webhook Secret Token Verification**: Header `X-Telegram-Bot-Api-Secret-Token` validation with timing-safe comparison (`hmac.compare_digest`).
 - [x] **Log Rotation (`RotatingFileHandler`)**: Automatic log file rotation capping log files at 5 MB with 5 backups.
 - [x] **API Retry & Graceful Degradation**: Exponential backoff retry loop (3 attempts) with threaded execution and structured fallback replies.
+- [x] **Admin Dashboard & Management Controls**: Private Telegram commands (`/start`, `/panel`, `/stats`, `/pause`, `/resume`, `/logs`), bot pause switch, daily message & API token tracking, direct log file retrieval via `sendDocument`, and strict admin security verification.
 
 ---
 
@@ -30,7 +31,6 @@
 
 - [x] **Telegram Webhook Secret Token Verification**:
   - *Status*: Completed! Header `X-Telegram-Bot-Api-Secret-Token` is verified with `hmac.compare_digest`. Unauthorized requests are blocked with HTTP 403 Forbidden.
-
 
 ---
 
@@ -41,18 +41,18 @@
 - [x] **API Retry & Graceful Degradation**:
   - *Status*: Completed! Implemented non-blocking worker thread execution, 3-attempt exponential backoff retry loop, and graceful degradation fallback with polite user acknowledgment and instant admin notification.
 
-
 ---
 
 ## 🟢 Priority 3: Features & Knowledge Management
 
 - [x] **Externalize Knowledge Base (FAQ)**:
   - *Status*: Completed! Credentials and IT FAQ stored in `knowledge_base.json` (auto-reloads on file edit, keywords feed into filter). Sample provided in `knowledge_base.json.example`.
+- [x] **Admin Dashboard & Management Controls**:
+  - *Status*: Completed! Added private Telegram commands and inline panel for the administrator (`str(sender_id) == str(ADMIN_CHAT_ID)`):
+    - Bot pause/resume toggle with database persistence (`bot_settings`).
+    - Daily statistics and Gemini API token tracking (`api_usage`).
+    - Direct log file sending via Telegram (`sendDocument`).
 
-- [ ] **Multi-Admin Notification**:
-  - *Action*: Support multiple admin chat IDs in `ADMIN_CHAT_ID` (comma-separated list) so an entire IT team can receive alerts.
-- [ ] **Support Direct Messages to Bot**:
-  - *Action*: Handle regular private messages (`message`) with a `/start` and `/status` command so admins can verify bot health directly inside Telegram.
 
 ---
 

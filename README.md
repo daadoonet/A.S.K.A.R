@@ -36,6 +36,8 @@
 7. **Non-Blocking Asynchronous Architecture**: Synchronous Google API calls and Gemini API calls run in worker threads (`asyncio.to_thread`) while Telegram API calls utilize connection pooling with a shared `httpx.AsyncClient`.
 8. **Log Rotation & Disk Protection**: `RotatingFileHandler` restricts `bot_activity.log` to 5 MB with 5 backup files, preventing uncontrolled disk consumption.
 9. **API Resilience & Graceful Degradation**: 3-attempt exponential backoff retry for Gemini API rate limits and network errors with a polite fallback reply to users and immediate admin alert.
+10. **Admin Dashboard & Remote Controls**: Direct Telegram private commands (`/start`, `/panel`, `/stats`, `/pause`, `/resume`, `/logs`) allowing the administrator to toggle bot auto-replies, inspect daily message & Gemini API token metrics, and download log files directly via Telegram.
+
 
 
 ---

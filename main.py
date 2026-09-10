@@ -214,8 +214,127 @@ def init_db():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_chat_history_user ON chat_history (user_chat_id, id DESC)
         """)
+
+        # جدول تنظیمات سیستم (برای ذخیره پایدار وضعیت فعال/غیرفعال بودن پاسخگویی ربات)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('bot_active', 'true')
+        """)
+
+        # جدول ثبت آمار و مصرف توکن‌های API جمنای
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model TEXT,
+                prompt_tokens INTEGER DEFAULT 0,
+                candidate_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage (created_at)
+        """)
         conn.commit()
-    logging.info("📦 پایگاه داده رویدادها و تاریخچه گفتگو آماده‌سازی شد.")
+    logging.info("📦 پایگاه داده رویدادها، تاریخچه گفتگو و تنظیمات سیستم آماده‌سازی شد.")
+
+def get_bot_active_status() -> bool:
+    """بررسی وضعیت روشن یا خاموش بودن پاسخگویی خودکار ربات"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_settings WHERE key = 'bot_active'")
+            row = cursor.fetchone()
+            if row and row[0] == 'false':
+                return False
+    except Exception as e:
+        logging.error(f"❌ خطا در خواندن وضعیت ربات: {e}")
+    return True
+
+def set_bot_active_status(active: bool):
+    """تنظیم وضعیت فعال یا متوقف بودن پاسخگویی خودکار ربات"""
+    val_str = 'true' if active else 'false'
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO bot_settings (key, value, updated_at)
+            VALUES ('bot_active', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """, (val_str,))
+        conn.commit()
+
+def record_api_usage(model: str, prompt_tokens: int, candidate_tokens: int, total_tokens: int):
+    """ثبت مصرف توکن فراخوانی جمنای در دیتابیس"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO api_usage (model, prompt_tokens, candidate_tokens, total_tokens)
+                VALUES (?, ?, ?, ?)
+            """, (model, prompt_tokens, candidate_tokens, total_tokens))
+            conn.commit()
+    except Exception as e:
+        logging.error(f"❌ خطا در ثبت مصرف API: {e}")
+
+def get_daily_stats() -> dict:
+    """محاسبه آمار پیام‌ها و مصرف API در طول روز جاری"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            # پیام‌های دریافتی از کاربران امروز
+            cursor.execute("SELECT COUNT(*) FROM chat_history WHERE role = 'user' AND date(created_at, 'localtime') = date('now', 'localtime')")
+            user_msgs = cursor.fetchone()[0]
+            
+            # پاسخ‌های خودکار هوش مصنوعی امروز
+            cursor.execute("SELECT COUNT(*) FROM chat_history WHERE role = 'model' AND date(created_at, 'localtime') = date('now', 'localtime')")
+            model_replies = cursor.fetchone()[0]
+            
+            # تعداد کاربران منحصربه‌فرد امروز
+            cursor.execute("SELECT COUNT(DISTINCT user_chat_id) FROM chat_history WHERE date(created_at, 'localtime') = date('now', 'localtime')")
+            unique_users = cursor.fetchone()[0]
+            
+            # فراخوانی‌های جمنای و توکن‌های مصرفی امروز
+            cursor.execute("""
+                SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(candidate_tokens), 0), COALESCE(SUM(total_tokens), 0)
+                FROM api_usage
+                WHERE date(created_at, 'localtime') = date('now', 'localtime')
+            """)
+            row = cursor.fetchone()
+            api_calls = row[0]
+            prompt_tokens = row[1]
+            candidate_tokens = row[2]
+            total_tokens = row[3]
+            
+            # جلسات در انتظار تایید ادمین
+            cursor.execute("SELECT COUNT(*) FROM pending_events")
+            pending_count = cursor.fetchone()[0]
+            
+            return {
+                "user_messages_today": user_msgs,
+                "model_replies_today": model_replies,
+                "total_messages_today": user_msgs + model_replies,
+                "unique_users_today": unique_users,
+                "api_calls_today": api_calls,
+                "prompt_tokens_today": prompt_tokens,
+                "candidate_tokens_today": candidate_tokens,
+                "total_tokens_today": total_tokens,
+                "pending_events_count": pending_count,
+                "is_active": get_bot_active_status()
+            }
+    except Exception as e:
+        logging.error(f"❌ خطا در محاسبه آمار روزانه: {e}")
+        return {
+            "user_messages_today": 0, "model_replies_today": 0, "total_messages_today": 0,
+            "unique_users_today": 0, "api_calls_today": 0, "prompt_tokens_today": 0,
+            "candidate_tokens_today": 0, "total_tokens_today": 0, "pending_events_count": 0,
+            "is_active": get_bot_active_status()
+        }
 
 def save_pending_event(event_id: str, ev: dict, user_chat_id: str = None, business_connection_id: str = None, sender_name: str = None):
     """ذخیره رویداد معلق در دیتابیس به همراه اطلاعات کاربر متقاضی"""
@@ -321,6 +440,7 @@ def cleanup_expired_events(hours: int = 48):
             cursor = conn.cursor()
             cursor.execute("DELETE FROM pending_events WHERE created_at <= datetime('now', ?)", (f"-{hours} hours",))
             cursor.execute("DELETE FROM chat_history WHERE created_at <= datetime('now', ?)", (f"-{hours} hours",))
+            cursor.execute("DELETE FROM api_usage WHERE created_at <= datetime('now', '-30 days')")
             conn.commit()
     except Exception as e:
         logging.warning(f"⚠️ خطای پاکسازی رکوردهای منقضی شده: {e}")
@@ -405,14 +525,21 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-def _generate_gemini_content(contents: str) -> str:
+def _generate_gemini_content(contents: str) -> tuple[str, int, int, int]:
     """اجرای همگام فراخوانی مدل جمنای در ترد مجزا"""
     response = client_ai.models.generate_content(
         model=GEMINI_MODEL,
         contents=contents,
         config={'response_mime_type': 'application/json'}
     )
-    return response.text
+    prompt_tokens = 0
+    candidate_tokens = 0
+    total_tokens = 0
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        prompt_tokens = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+        candidate_tokens = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+        total_tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
+    return response.text, prompt_tokens, candidate_tokens, total_tokens
 
 async def call_gemini(user_text: str, history: list[dict] = None, max_retries: int = 3) -> dict:
     if not client_ai:
@@ -458,7 +585,8 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
     for attempt in range(1, max_retries + 1):
         try:
             # اجرای غیرمسدودکننده در Worker Thread
-            response_text = await asyncio.to_thread(_generate_gemini_content, full_contents)
+            response_text, p_tok, c_tok, t_tok = await asyncio.to_thread(_generate_gemini_content, full_contents)
+            record_api_usage(GEMINI_MODEL, p_tok, c_tok, t_tok)
             return json.loads(response_text)
         except Exception as e:
             last_err = e
@@ -523,6 +651,102 @@ async def edit_telegram_message(chat_id: str | int, message_id: int, text: str, 
     except Exception as e:
         logging.error(f"❌ خطا در فراخوانی ویرایش پیام تلگرام: {e}")
 
+async def send_telegram_document(chat_id: str | int, file_path: str, caption: str = ""):
+    """ارسال فایل لاگ یا سایر اسناد به تلگرام ادمین"""
+    if not http_client:
+        logging.error("❌ کلاینت HTTP آماده نیست.")
+        return
+    if not os.path.exists(file_path):
+        await send_telegram_message(chat_id=chat_id, text=f"⚠️ فایل {file_path} یافت نشد.")
+        return
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+            files = {"document": (os.path.basename(file_path), file_bytes, "text/plain")}
+            data = {"chat_id": str(chat_id), "caption": caption}
+            res = await http_client.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
+            resp_data = res.json()
+            if not resp_data.get("ok"):
+                logging.error(f"❌ خطای ارسال سند تلگرام: {resp_data}")
+    except Exception as e:
+        logging.error(f"❌ خطا در ارسال فایل لاگ: {e}")
+
+def build_admin_panel_markup(is_active: bool) -> dict:
+    """ساخت دکمه‌های پنل کنترلی ادمین"""
+    toggle_text = "🔴 خاموش کردن ربات (توقف پاسخگویی)" if is_active else "🟢 روشن کردن ربات (شروع پاسخگویی)"
+    return {
+        "inline_keyboard": [
+            [{"text": toggle_text, "callback_data": "admin:toggle"}],
+            [{"text": "📊 آمار پیام‌ها و مصرف API امروز", "callback_data": "admin:stats"}],
+            [
+                {"text": "📄 دریافت فایل لاگ", "callback_data": "admin:logs"},
+                {"text": "🔄 بروزرسانی پنل", "callback_data": "admin:refresh"}
+            ]
+        ]
+    }
+
+def format_admin_stats_text() -> str:
+    """قالب‌بندی گزارش آماری روزانه برای نمایش به ادمین"""
+    stats = get_daily_stats()
+    status_emoji = "🟢 روشن و فعال" if stats["is_active"] else "🔴 متوقف و خاموش"
+    free_tier_daily_limit = 1500  # سقف استاندارد درخواست روزانه طرح رایگان جمنای
+    remaining_requests = max(0, free_tier_daily_limit - stats["api_calls_today"])
+    
+    return (
+        f"📊 **گزارش عملکرد و آمار امروز ربات A.S.K.A.R**\n\n"
+        f"⚙️ **وضعیت سیستم:** {status_emoji}\n\n"
+        f"💬 **آمار پیام‌های امروز:**\n"
+        f"  • کل پیام‌های رد و بدل شده: `{stats['total_messages_today']}`\n"
+        f"  • پیام‌های دریافتی از کاربران: `{stats['user_messages_today']}`\n"
+        f"  • پاسخ‌های ارسالی هوش مصنوعی: `{stats['model_replies_today']}`\n"
+        f"  • تعداد مخاطبان منحصربه‌فرد: `{stats['unique_users_today']}` نفر\n\n"
+        f"🤖 **مصرف API جمنای امروز:**\n"
+        f"  • تعداد درخواست‌ها (RPD): `{stats['api_calls_today']}` از `{free_tier_daily_limit}` مجاز روزانه\n"
+        f"  • درخواست‌های باقیمانده امروز: `{remaining_requests}`\n"
+        f"  • کل توکن‌های مصرفی امروز: `{stats['total_tokens_today']:,}` توکن\n"
+        f"    (ورودی: `{stats['prompt_tokens_today']:,}` | تولیدی: `{stats['candidate_tokens_today']:,}`)\n\n"
+        f"📅 **جلسات و تقویم:**\n"
+        f"  • رویدادهای منتظر تایید: `{stats['pending_events_count']}` مورد"
+    )
+
+async def handle_admin_command(chat_id: str | int, text: str):
+    """پردازش دستورات دریافتی از پیام خصوصی ادمین"""
+    cmd = text.lower().strip()
+    is_active = get_bot_active_status()
+    
+    if cmd in ["/start", "/panel", "/help"]:
+        status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
+        welcome_text = (
+            f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
+            f"وضعیت کنونی: {status_text}\n\n"
+            f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
+        )
+        await send_telegram_message(
+            chat_id=chat_id,
+            text=welcome_text,
+            reply_markup=build_admin_panel_markup(is_active)
+        )
+    elif cmd == "/stats":
+        stats_text = format_admin_stats_text()
+        await send_telegram_message(chat_id=chat_id, text=stats_text)
+    elif cmd in ["/pause", "/stop"]:
+        set_bot_active_status(False)
+        await send_telegram_message(chat_id=chat_id, text="🔴 پاسخگویی خودکار ربات متوقف شد.")
+    elif cmd in ["/resume", "/play", "/unpause"]:
+        set_bot_active_status(True)
+        await send_telegram_message(chat_id=chat_id, text="🟢 پاسخگویی خودکار ربات مجدداً فعال شد.")
+    elif cmd == "/logs":
+        await send_telegram_message(chat_id=chat_id, text="⏳ در حال آماده‌سازی و ارسال فایل لاگ...")
+        await send_telegram_document(chat_id=chat_id, file_path="bot_activity.log", caption="📄 فایل لاگ سرور bot_activity.log")
+    elif cmd == "/status":
+        status_text = "🟢 فعال" if is_active else "🔴 متوقف"
+        await send_telegram_message(chat_id=chat_id, text=f"وضعیت فعلی ربات: {status_text}")
+    else:
+        await send_telegram_message(
+            chat_id=chat_id,
+            text="دستور نامعتبر است. برای مشاهده پنل دستور /panel را ارسال کنید."
+        )
+
 def insert_google_calendar_event(ev: dict) -> dict:
     """درج رویداد در تقویم گوگل به صورت همگام (برای اجرا در Worker Thread)"""
     if not calendar_service:
@@ -558,8 +782,13 @@ async def telegram_webhook(request: Request):
 
     data = await request.json()
     
-    # دریافت پیام ورودی به اکانت
+    # دریافت پیام ورودی به اکانت تجاری
     if "business_message" in data:
+        # اگر ربات توسط ادمین در حالت سکوت/تعمیرات قرار گرفته باشد، پاسخگویی انجام نشود
+        if not get_bot_active_status():
+            logging.info("⏸️ پیام ورودی نادیده گرفته شد (پاسخگویی خودکار ربات توسط ادمین متوقف است).")
+            return {"ok": True}
+
         msg = data["business_message"]
         text = msg.get("text", "")
         sender_name = msg.get("from", {}).get("first_name", "کاربر")
@@ -643,7 +872,30 @@ async def telegram_webhook(request: Request):
             )
             await send_telegram_message(chat_id=ADMIN_CHAT_ID, text=admin_alert)
 
-    # مدیریت کلیک روی دکمه‌ها
+    # ۲. پیام مستقیم در چت خصوصی به خود بات (فرامین ادمین)
+    elif "message" in data:
+        msg = data["message"]
+        sender_id = msg.get("from", {}).get("id")
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "").strip()
+
+        if not text:
+            return {"ok": True}
+
+        # بررسی دسترسی اختصاصی ادمین
+        if not ADMIN_CHAT_ID or str(sender_id) != str(ADMIN_CHAT_ID):
+            logging.warning(f"⛔ پیام مستقیم از کاربر غیرمجاز مسدود شد (User ID: {sender_id}).")
+            await send_telegram_message(
+                chat_id=chat_id,
+                text="⛔ شما دسترسی ادمین ندارید. این ربات یک دستیار تجاری است و فقط توسط مدیر سیستم کنترل می‌شود."
+            )
+            return {"ok": True}
+
+        logging.info(f"👑 دستور ادمین دریافت شد: {text}")
+        await handle_admin_command(chat_id=chat_id, text=text)
+        return {"ok": True}
+
+    # ۳. مدیریت کلیک روی دکمه‌ها
     elif "callback_query" in data:
         cb = data["callback_query"]
         cb_id = cb["id"]
@@ -652,6 +904,59 @@ async def telegram_webhook(request: Request):
         cb_chat_id = cb_msg.get("chat", {}).get("id") or ADMIN_CHAT_ID
         cb_msg_id = cb_msg.get("message_id")
         original_text = cb_msg.get("text", "")
+        sender_id = cb.get("from", {}).get("id")
+
+        # دکمه‌های پنل مدیریت ادمین
+        if cb_data.startswith("admin:"):
+            if not ADMIN_CHAT_ID or str(sender_id) != str(ADMIN_CHAT_ID):
+                await answer_callback_query(cb_id, text="⛔ دسترسی غیرمجاز!")
+                return {"ok": True}
+
+            action = cb_data.split(":", 1)[1]
+            if action == "toggle":
+                current_status = get_bot_active_status()
+                new_status = not current_status
+                set_bot_active_status(new_status)
+                status_str = "🟢 پاسخگویی روشن شد" if new_status else "🔴 پاسخگویی خاموش شد"
+                await answer_callback_query(cb_id, text=status_str)
+
+                status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if new_status else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
+                panel_text = (
+                    f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
+                    f"وضعیت کنونی: {status_text}\n\n"
+                    f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
+                )
+                if cb_msg_id:
+                    await edit_telegram_message(
+                        chat_id=cb_chat_id,
+                        message_id=cb_msg_id,
+                        text=panel_text,
+                        reply_markup=build_admin_panel_markup(new_status)
+                    )
+            elif action == "stats":
+                await answer_callback_query(cb_id, text="📊 در حال استخراج آمار...")
+                stats_text = format_admin_stats_text()
+                await send_telegram_message(chat_id=cb_chat_id, text=stats_text)
+            elif action == "logs":
+                await answer_callback_query(cb_id, text="📄 در حال ارسال فایل لاگ...")
+                await send_telegram_document(chat_id=cb_chat_id, file_path="bot_activity.log", caption="📄 فایل لاگ سرور bot_activity.log")
+            elif action == "refresh":
+                is_active = get_bot_active_status()
+                status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
+                panel_text = (
+                    f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
+                    f"وضعیت کنونی: {status_text}\n\n"
+                    f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
+                )
+                if cb_msg_id:
+                    await edit_telegram_message(
+                        chat_id=cb_chat_id,
+                        message_id=cb_msg_id,
+                        text=panel_text,
+                        reply_markup=build_admin_panel_markup(is_active)
+                    )
+                await answer_callback_query(cb_id, text="وضعیت بروزرسانی شد ✅")
+            return {"ok": True}
         
         if ":" in cb_data:
             action, event_id = cb_data.split(":", 1)
