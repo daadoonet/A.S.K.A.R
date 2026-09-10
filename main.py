@@ -5,6 +5,7 @@ import sqlite3
 import asyncio
 import urllib.parse
 import hmac
+import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -22,7 +23,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         RotatingFileHandler(
-            "bot_activity.log",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_activity.log"),
             maxBytes=5 * 1024 * 1024,  # 5 MB
             backupCount=5,
             encoding="utf-8"
@@ -55,7 +56,8 @@ CALENDAR_ID = sanitize_calendar_id(os.getenv("GOOGLE_CALENDAR_ID"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Tehran")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
-DB_FILE = "events.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "events.db")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
@@ -77,7 +79,7 @@ _kb_cache = {"mtime": 0, "text": "", "keywords": []}
 
 def get_knowledge_base() -> tuple[str, list[str]]:
     """خواندن داینامیک پایگاه دانش (FAQ و پسوردها) از فایل knowledge_base.json با کش هوشمند"""
-    kb_path = "knowledge_base.json"
+    kb_path = os.path.join(BASE_DIR, "knowledge_base.json")
     if not os.path.exists(kb_path):
         return ("(اطلاعات تکمیلی پایگاه دانش تنظیم نشده است)", [])
     try:
@@ -146,8 +148,7 @@ def should_process_message(text: str) -> bool:
     
     for kw in combined_keywords:
         # نرمال‌سازی کلمه کلیدی
-        normalized_kw = kw.lower().replace("‌", " ").replace("آ", "ا").replace("ي", "y").replace("ك", "k")
-        normalized_kw = normalized_kw.replace("ي", "ی").replace("ك", "ک")
+        normalized_kw = kw.lower().replace("‌", " ").replace("آ", "ا").replace("ي", "ی").replace("ك", "ک")
         if normalized_kw in normalized_text:
             return True
             
@@ -159,9 +160,9 @@ client_ai = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 # اتصال به Google Calendar
 calendar_service = None
 try:
-    if os.path.exists('credentials.json'):
+    if os.path.exists(os.path.join(BASE_DIR, 'credentials.json')):
         SCOPES = ['https://www.googleapis.com/auth/calendar']
-        creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+        creds = service_account.Credentials.from_service_account_file(os.path.join(BASE_DIR, 'credentials.json'), scopes=SCOPES)
         calendar_service = build('calendar', 'v3', credentials=creds)
         logging.info("✅ اتصال سرویس اکانت گوگل برقرار شد.")
     else:
@@ -407,7 +408,11 @@ def is_user_in_active_session(user_chat_id: str | int, timeout_minutes: int = SE
             if not row:
                 return False
             last_time_str = row[0]
-            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            # پشتیبانی از هر دو فرمت SQLite (با یا بدون میکروثانیه)
+            try:
+                last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+            except ValueError:
+                last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             diff_seconds = (datetime.now(timezone.utc) - last_time).total_seconds()
             return diff_seconds < (timeout_minutes * 60)
     except Exception as e:
@@ -587,7 +592,12 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
             # اجرای غیرمسدودکننده در Worker Thread
             response_text, p_tok, c_tok, t_tok = await asyncio.to_thread(_generate_gemini_content, full_contents)
             record_api_usage(GEMINI_MODEL, p_tok, c_tok, t_tok)
-            return json.loads(response_text)
+            result = json.loads(response_text)
+            # اعتبارسنجی حداقلی ساختار پاسخ جمنای
+            if not isinstance(result, dict) or "type" not in result:
+                logging.warning(f"⚠️ پاسخ جمنای ساختار نامعتبر دارد: {response_text[:200]}")
+                return {"type": "ignore", "reply_to_user": None, "notify_admin": False, "calendar_event": None}
+            return result
         except Exception as e:
             last_err = e
             if attempt < max_retries:
@@ -606,11 +616,13 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
         "calendar_event": None
     }
 
-async def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None, business_connection_id: str = None):
+async def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None, business_connection_id: str = None, parse_mode: str = None):
     if not http_client:
         logging.error("❌ کلاینت HTTP آماده نیست.")
         return
     payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     if business_connection_id:
@@ -635,12 +647,14 @@ async def answer_callback_query(callback_query_id: str, text: str = None):
     except Exception as e:
         logging.error(f"❌ خطای پاسخ به Callback Query: {e}")
 
-async def edit_telegram_message(chat_id: str | int, message_id: int, text: str, reply_markup: dict = None):
+async def edit_telegram_message(chat_id: str | int, message_id: int, text: str, reply_markup: dict = None, parse_mode: str = None):
     """ویرایش متن و دکمه‌های پیام تلگرام برای بستن دکمه‌ها پس از کلیک"""
     if not http_client:
         logging.error("❌ کلاینت HTTP آماده نیست.")
         return
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     try:
@@ -709,21 +723,24 @@ def format_admin_stats_text() -> str:
         f"  • رویدادهای منتظر تایید: `{stats['pending_events_count']}` مورد"
     )
 
+def format_admin_panel_text(is_active: bool) -> str:
+    """قالب‌بندی متن پنل مدیریت ادمین (حذف تکرار)"""
+    status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
+    return (
+        f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
+        f"وضعیت کنونی: {status_text}\n\n"
+        f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
+    )
+
 async def handle_admin_command(chat_id: str | int, text: str):
     """پردازش دستورات دریافتی از پیام خصوصی ادمین"""
     cmd = text.lower().strip()
     is_active = get_bot_active_status()
     
     if cmd in ["/start", "/panel", "/help"]:
-        status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
-        welcome_text = (
-            f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
-            f"وضعیت کنونی: {status_text}\n\n"
-            f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
-        )
         await send_telegram_message(
             chat_id=chat_id,
-            text=welcome_text,
+            text=format_admin_panel_text(is_active),
             reply_markup=build_admin_panel_markup(is_active)
         )
     elif cmd == "/stats":
@@ -737,7 +754,7 @@ async def handle_admin_command(chat_id: str | int, text: str):
         await send_telegram_message(chat_id=chat_id, text="🟢 پاسخگویی خودکار ربات مجدداً فعال شد.")
     elif cmd == "/logs":
         await send_telegram_message(chat_id=chat_id, text="⏳ در حال آماده‌سازی و ارسال فایل لاگ...")
-        await send_telegram_document(chat_id=chat_id, file_path="bot_activity.log", caption="📄 فایل لاگ سرور bot_activity.log")
+        await send_telegram_document(chat_id=chat_id, file_path=os.path.join(BASE_DIR, "bot_activity.log"), caption="📄 فایل لاگ سرور bot_activity.log")
     elif cmd == "/status":
         status_text = "🟢 فعال" if is_active else "🔴 متوقف"
         await send_telegram_message(chat_id=chat_id, text=f"وضعیت فعلی ربات: {status_text}")
@@ -803,10 +820,10 @@ async def telegram_webhook(request: Request):
 
         # فیلتر متنی اولیه: اگر خارج از جلسه فعال بود و کلمات کلیدی هم نداشت، نادیده گرفته شود
         if not is_active and not should_process_message(text):
-            logging.info(f"⏭️ پیام از {sender_name} نادیده گرفته شد (خارج از جلسه فعال و فاقد کلمات کلیدی): {text}")
+            logging.info(f"⏭️ پیام از {sender_name} نادیده گرفته شد (خارج از جلسه فعال و فاقد کلمات کلیدی، {len(text)} کاراکتر)")
             return {"ok": True}
 
-        logging.info(f"📩 پیام جدید از {sender_name} (جلسه فعال: {is_active}): {text}")
+        logging.info(f"📩 پیام جدید از {sender_name} (جلسه فعال: {is_active}، {len(text)} کاراکتر)")
 
         # دریافت سوابق گفتگو برای آگاهی هوش مصنوعی از پیشینه صحبت‌ها
         recent_history = get_recent_chat_history(user_chat_id, limit=6)
@@ -835,7 +852,7 @@ async def telegram_webhook(request: Request):
         # ۲. پیشنهاد تسک برای تقویم گوگل (ارسال به ادمین همراه با دکمه‌های تایید و رد)
         if analysis.get("type") == "task" and analysis.get("calendar_event"):
             ev = analysis["calendar_event"]
-            event_id = f"ev_{int(datetime.now().timestamp())}"
+            event_id = f"ev_{uuid.uuid4().hex[:12]}"
             save_pending_event(
                 event_id=event_id,
                 ev=ev,
@@ -920,17 +937,11 @@ async def telegram_webhook(request: Request):
                 status_str = "🟢 پاسخگویی روشن شد" if new_status else "🔴 پاسخگویی خاموش شد"
                 await answer_callback_query(cb_id, text=status_str)
 
-                status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if new_status else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
-                panel_text = (
-                    f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
-                    f"وضعیت کنونی: {status_text}\n\n"
-                    f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
-                )
                 if cb_msg_id:
                     await edit_telegram_message(
                         chat_id=cb_chat_id,
                         message_id=cb_msg_id,
-                        text=panel_text,
+                        text=format_admin_panel_text(new_status),
                         reply_markup=build_admin_panel_markup(new_status)
                     )
             elif action == "stats":
@@ -939,20 +950,14 @@ async def telegram_webhook(request: Request):
                 await send_telegram_message(chat_id=cb_chat_id, text=stats_text)
             elif action == "logs":
                 await answer_callback_query(cb_id, text="📄 در حال ارسال فایل لاگ...")
-                await send_telegram_document(chat_id=cb_chat_id, file_path="bot_activity.log", caption="📄 فایل لاگ سرور bot_activity.log")
+                await send_telegram_document(chat_id=cb_chat_id, file_path=os.path.join(BASE_DIR, "bot_activity.log"), caption="📄 فایل لاگ سرور bot_activity.log")
             elif action == "refresh":
                 is_active = get_bot_active_status()
-                status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
-                panel_text = (
-                    f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
-                    f"وضعیت کنونی: {status_text}\n\n"
-                    f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
-                )
                 if cb_msg_id:
                     await edit_telegram_message(
                         chat_id=cb_chat_id,
                         message_id=cb_msg_id,
-                        text=panel_text,
+                        text=format_admin_panel_text(is_active),
                         reply_markup=build_admin_panel_markup(is_active)
                     )
                 await answer_callback_query(cb_id, text="وضعیت بروزرسانی شد ✅")
@@ -961,6 +966,12 @@ async def telegram_webhook(request: Request):
         if ":" in cb_data:
             action, event_id = cb_data.split(":", 1)
             
+            # بررسی دسترسی ادمین برای تایید و رد رویدادها
+            if action in ("approve", "reject"):
+                if not ADMIN_CHAT_ID or str(sender_id) != str(ADMIN_CHAT_ID):
+                    await answer_callback_query(cb_id, text="⛔ دسترسی غیرمجاز!")
+                    return {"ok": True}
+
             if action == "approve":
                 ev = get_pending_event(event_id)
                 if ev and calendar_service:

@@ -214,12 +214,10 @@ A.S.K.A.R/
 
 ## 🗺️ Roadmap & Next Steps
 
-See [TODO.md](file:///d:/A.S.K.A.R/TODO.md) for upcoming improvements, including:
-- Webhook secret token validation (`X-Telegram-Bot-Api-Secret-Token`).
-- Multi-admin alerts support.
-- Direct message `/start` and `/status` admin diagnostic commands.
-- Docker & Docker Compose setup.
-
+See [TODO.md](TODO.md) for the full roadmap. Remaining improvements include:
+- Docker & Docker Compose containerization.
+- Production web server configuration (Gunicorn/Uvicorn workers).
+- Automated CI/CD linting and testing (GitHub Actions).
 
 ---
 
