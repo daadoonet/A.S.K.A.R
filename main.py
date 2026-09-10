@@ -13,14 +13,20 @@ import httpx
 import jdatetime
 from google import genai
 from google.oauth2 import service_account
+from logging.handlers import RotatingFileHandler
 from googleapiclient.discovery import build
 
-# تنظیم سیستم لاگینگ (چاپ در کنسول و ذخیره در فایل)
+# تنظیم سیستم لاگینگ با چرخش فایل (حداکثر ۵ مگابایت و نگهداری ۵ فایل بکاپ)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("bot_activity.log", encoding="utf-8"),
+        RotatingFileHandler(
+            "bot_activity.log",
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=5,
+            encoding="utf-8"
+        ),
         logging.StreamHandler()
     ]
 )
@@ -399,7 +405,16 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-async def call_gemini(user_text: str, history: list[dict] = None):
+def _generate_gemini_content(contents: str) -> str:
+    """اجرای همگام فراخوانی مدل جمنای در ترد مجزا"""
+    response = client_ai.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config={'response_mime_type': 'application/json'}
+    )
+    return response.text
+
+async def call_gemini(user_text: str, history: list[dict] = None, max_retries: int = 3) -> dict:
     if not client_ai:
         raise RuntimeError("کلید GEMINI_API_KEY تنظیم نشده است.")
     now = datetime.now()
@@ -439,12 +454,29 @@ async def call_gemini(user_text: str, history: list[dict] = None):
 
     full_contents = f"{prompt}\n{formatted_history}\nپیام جدید کاربر:\n{user_text}"
 
-    response = client_ai.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=full_contents,
-        config={'response_mime_type': 'application/json'}
-    )
-    return json.loads(response.text)
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            # اجرای غیرمسدودکننده در Worker Thread
+            response_text = await asyncio.to_thread(_generate_gemini_content, full_contents)
+            return json.loads(response_text)
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                delay = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                logging.warning(f"⚠️ خطای فراخوانی جمنای در تلاش {attempt}/{max_retries}: {e}. تلاش مجدد پس از {delay} ثانیه...")
+                await asyncio.sleep(delay)
+            else:
+                logging.error(f"❌ تمامی {max_retries} تلاش برای ارتباط با جمنای با شکست مواجه شد: {e}")
+
+    # در صورت شکست تمامی تلاش‌ها: بازگشت پاسخ جایگزین هوشمند (Graceful Degradation)
+    return {
+        "type": "fallback",
+        "reply_to_user": "سلام! سیستم موقتاً با کندی مواجه شده، پیامت رو دریافت کردم و در اسرع وقت بهت پاسخ می‌دم. 🙏",
+        "notify_admin": True,
+        "admin_notification_text": f"خطا در ارتباط با سرویس هوش مصنوعی جمنای پس از {max_retries} بار تلاش: {last_err}",
+        "calendar_event": None
+    }
 
 async def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None, business_connection_id: str = None):
     if not http_client:

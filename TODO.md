@@ -21,6 +21,8 @@
 - [x] **Webhook URL Resilience**: Route aliases for `/webhook`, `/webhook/`, and `/webhook\` to prevent 404s.
 - [x] **Externalize Knowledge Base (FAQ & Wi-Fi)**: Separated sensitive credentials and IT troubleshooting guides into `knowledge_base.json` with hot-reloading (mtime cache), dynamic keyword ingestion, and `.gitignore` protection.
 - [x] **Telegram Webhook Secret Token Verification**: Header `X-Telegram-Bot-Api-Secret-Token` validation with timing-safe comparison (`hmac.compare_digest`).
+- [x] **Log Rotation (`RotatingFileHandler`)**: Automatic log file rotation capping log files at 5 MB with 5 backups.
+- [x] **API Retry & Graceful Degradation**: Exponential backoff retry loop (3 attempts) with threaded execution and structured fallback replies.
 
 ---
 
@@ -34,11 +36,11 @@
 
 ## 🟡 Priority 2: Reliability & Code Quality
 
-- [ ] **Log Rotation (`RotatingFileHandler`)**:
-  - *Problem*: Standard `logging.FileHandler` indefinitely inflates `bot_activity.log`.
-  - *Action*: Switch to `logging.handlers.RotatingFileHandler` with a maximum file size (e.g., 5 MB) and 3–5 backups.
-- [ ] **API Retry & Graceful Degradation**:
-  - *Action*: Implement retry/exponential backoff for Gemini API rate limits (`429`) or temporary network interruptions.
+- [x] **Log Rotation (`RotatingFileHandler`)**:
+  - *Status*: Completed! Configured `RotatingFileHandler` with 5 MB maximum size and 5 backup files (`bot_activity.log.1`..`5`).
+- [x] **API Retry & Graceful Degradation**:
+  - *Status*: Completed! Implemented non-blocking worker thread execution, 3-attempt exponential backoff retry loop, and graceful degradation fallback with polite user acknowledgment and instant admin notification.
+
 
 ---
 
