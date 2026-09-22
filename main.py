@@ -75,84 +75,162 @@ KEYWORDS_FILTER = [
     "wifi", "internet", "printer", "password", "reset", "meeting", "session", "server", "task", "calendar", "event"
 ]
 
-_kb_cache = {"mtime": 0, "text": "", "keywords": []}
+WIFI_KEYWORDS = [
+    "وایفای", "وای فای", "wifi", "ssid", "رمز وایفای", "رمز وای فای", 
+    "پسورد وایفای", "پسورد وای فای", "دبستان", "دبیرستان", "مهمان"
+]
 
-def get_knowledge_base() -> tuple[str, list[str]]:
-    """خواندن داینامیک پایگاه دانش (FAQ و پسوردها) از فایل knowledge_base.json با کش هوشمند"""
+CALENDAR_KEYWORDS = [
+    "جلسه", "میتینگ", "قرار", "ساعت", "هماهنگ", "فردا", "پس‌فردا", "پس فردا", "امروز",
+    "شنبه", "یکشنبه", "دوشنبه", "سه شنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "پنج‌شنبه", "جمعه",
+    "کلاس", "سرور", "تسک", "برنامه", "تقویم", "کالندر", "رویداد", "شروع", "پایان", "هفته", "اردو",
+    "meeting", "session", "task", "calendar", "event"
+]
+
+_kb_raw_cache = {"mtime": 0, "data": {}}
+
+def load_raw_knowledge_base() -> dict:
+    """خواندن و کش کردن ساختار فایل knowledge_base.json"""
     kb_path = os.path.join(BASE_DIR, "knowledge_base.json")
     if not os.path.exists(kb_path):
-        return ("(اطلاعات تکمیلی پایگاه دانش تنظیم نشده است)", [])
+        return {}
     try:
         mtime = os.path.getmtime(kb_path)
-        if mtime != _kb_cache["mtime"]:
+        if mtime != _kb_raw_cache["mtime"]:
             with open(kb_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            lines = ["### Technical Knowledge Base & Troubleshooting Guides (اطلاعات و راهنماهای فنی):"]
-            
-            # شبکه‌های وای‌فای
-            wifi_list = data.get("wifi_networks", [])
-            if wifi_list:
-                lines.append("\n1. اطلاعات شبکه‌های وای‌فای (Wi-Fi Networks):")
-                for w in wifi_list:
-                    lines.append(f"   - {w.get('title', 'وای‌فای')}: نام شبکه (SSID): `{w.get('ssid', '-')}` | رمز عبور: `{w.get('password', '-')}` | راهنما: {w.get('guide', '')}")
-            
-            # راهنماهای عیب‌یابی متداول
-            faq_list = data.get("faq_troubleshooting", [])
-            if faq_list:
-                lines.append("\n2. راهنماهای عیب‌یابی متداول:")
-                for i, faq in enumerate(faq_list, start=1):
-                    lines.append(f"   {i}. موضوع: {faq.get('topic')}")
-                    steps = faq.get('diagnostic_steps', [])
-                    if steps:
-                        lines.append("      مراحل بررسی فنی:")
-                        for step in steps:
-                            lines.append(f"        * {step}")
-                    if faq.get('reply_template'):
-                        lines.append(f"      الگوی پیشنهادی پاسخ به کاربر: \"{faq.get('reply_template')}\"")
-
-            # پاسخ‌های سریع
-            qa_list = data.get("quick_qa", [])
-            if qa_list:
-                lines.append("\n3. پاسخ‌های سریع و اطلاعات کاربردی (Quick Q&A):")
-                for qa in qa_list:
-                    lines.append(f"   - سوال: {qa.get('question')} -> پاسخ: {qa.get('answer')}")
-
-            # استخراج کلمات کلیدی برای افزودن خودکار به فیلتر متنی
-            keywords = []
-            for faq in faq_list:
-                keywords.extend(faq.get("keywords", []))
-
-            _kb_cache["mtime"] = mtime
-            _kb_cache["text"] = "\n".join(lines)
-            _kb_cache["keywords"] = list(set(keywords))
-        return (_kb_cache["text"], _kb_cache["keywords"])
+                _kb_raw_cache["data"] = json.load(f)
+            _kb_raw_cache["mtime"] = mtime
+        return _kb_raw_cache["data"]
     except Exception as e:
         logging.error(f"❌ خطا در بارگذاری فایل knowledge_base.json: {e}")
-        return (_kb_cache["text"], _kb_cache["keywords"])
+        return _kb_raw_cache["data"]
+
+def normalize_text(text: str) -> str:
+    """نرمال‌سازی متن فارسی برای تطابق دقیق‌تر"""
+    if not text:
+        return ""
+    norm = text.lower().replace("‌", " ").replace("آ", "ا").replace("ي", "ی").replace("ك", "ک")
+    import re
+    return re.sub(r'[^\w\s]', ' ', norm)
+
+def match_any_keyword(keywords: list[str], normalized_text: str) -> bool:
+    """تطابق دقیق کلمات کلیدی با مرز کلمه جهت جلوگیری از تشابهات ناخواسته (مثل رمز و قرمز)"""
+    import re
+    padded = f" {normalized_text} "
+    for kw in keywords:
+        k = kw.strip()
+        if not k:
+            continue
+        pattern = r'(?:\s|^)' + re.escape(k) + r'(?:\s|$)'
+        if re.search(pattern, padded):
+            return True
+    return False
+
+def get_relevant_knowledge_base(user_text: str, history_text: str = "") -> str:
+    """
+    تزریق تطبیقی و انتخابی پایگاه دانش (Selective KB Injection) جهت کاهش ۷۰٪ توکن ورودی.
+    اگر درخواست مربوط به جلسه باشد، هیچ پایگاه دانشی فرستاده نمی‌شود.
+    اگر مربوط به موضوع خاصی باشد، فقط همان بخش فرستاده می‌شود.
+    """
+    data = load_raw_knowledge_base()
+    if not data:
+        return ""
+
+    combined = normalize_text(f"{user_text} {history_text}")
+    lines = []
+
+    # ۱. بررسی شبکه‌های وای‌فای
+    if match_any_keyword(WIFI_KEYWORDS, combined):
+        wifi_list = data.get("wifi_networks", [])
+        if wifi_list:
+            lines.append("اطلاعات شبکه‌های وای‌فای (Wi-Fi):")
+            for w in wifi_list:
+                lines.append(f"- {w.get('title')}: SSID: `{w.get('ssid', '-')}` | رمز: `{w.get('password', '-')}` | راهنما: {w.get('guide', '')}")
+
+    # ۲. بررسی راهنماهای عیب‌یابی متداول
+    faq_list = data.get("faq_troubleshooting", [])
+    for faq in faq_list:
+        faq_kws = [normalize_text(k).strip() for k in faq.get("keywords", [])]
+        if match_any_keyword(faq_kws, combined):
+            lines.append(f"\nراهنمای عیب‌یابی موضوع: {faq.get('topic')}")
+            steps = faq.get("diagnostic_steps", [])
+            if steps:
+                lines.append("مراحل بررسی: " + " | ".join(steps[:3]))
+            if faq.get("reply_template"):
+                lines.append(f"الگوی پاسخ پیشنهادی: \"{faq.get('reply_template')}\"")
+
+    # ۳. بررسی پاسخ‌های سریع (Quick QA)
+    qa_list = data.get("quick_qa", [])
+    for qa in qa_list:
+        q_norm = normalize_text(qa.get("question", ""))
+        words = [w for w in q_norm.split() if len(w) > 3]
+        if match_any_keyword(words, combined):
+            lines.append(f"\nپاسخ سریع: {qa.get('question')} -> {qa.get('answer')}")
+
+    if not lines:
+        return ""
+    return "### Technical Knowledge Base (راهنمای فنی مرتبط):\n" + "\n".join(lines)
+
+def handle_quick_chit_chat(text: str) -> str | None:
+    """
+    پاسخگویی فوری و محلی با ۰ توکن به احوالپرسی‌های کوتاه، تشکر، تایید و خداحافظی
+    """
+    if not text:
+        return None
+    
+    clean_text = text.strip()
+    norm = clean_text.lower().replace("‌", " ").replace("آ", "ا").replace("ي", "ی").replace("ك", "ک")
+    import re
+    norm_words = re.sub(r'[^\w\s]', '', norm).strip()
+    words = norm_words.split()
+    
+    # اگر پیام بیش از ۵ کلمه باشد، احتمالاً حاوی توضیحات فنی است و به هوش مصنوعی سپرده می‌شود
+    if len(words) > 5:
+        return None
+
+    # بررسی تشکر و قدردانی
+    gratitude_phrases = [
+        "مرسی", "ممنون", "ممنونم", "تشکر", "دستت درد نکنه", "دستتون درد نکنه", 
+        "دمت گرم", "سپاس", "لطف کردی", "خیلی ممنون", "متشکرم", "خدا خیرت بده"
+    ]
+    for p in gratitude_phrases:
+        if norm_words == p or norm_words.startswith(p + " ") or norm_words.endswith(" " + p):
+            return "خواهش می‌کنم، اگر مورد دیگه‌ای بود در خدمتم! ارادت 🙏"
+
+    # بررسی تایید و اختتام
+    ack_phrases = ["باشه", "اوکی", "اوکیه", "حله", "چشم", "عالیه", "خیلی خب", "باش", "حتما"]
+    if norm_words in ack_phrases:
+        return "ارادت، در خدمتم 🙏"
+
+    # بررسی خداحافظی و خسته‌نباشید
+    farewell_phrases = ["خداحافظ", "خداحافظی", "فعلا", "خسته نباشی", "خسته نباشید", "روز خوش", "شب خوش"]
+    for p in farewell_phrases:
+        if norm_words == p or norm_words.startswith(p + " "):
+            return "سلامت باشی، روزت خوش! ارادت 🙏"
+
+    # بررسی سلام خالی بدون سوال
+    greeting_phrases = ["سلام", "سلام علیکم", "درود", "صبح بخیر", "عصر بخیر", "وقت بخیر", "سلام وقت بخیر"]
+    if norm_words in greeting_phrases:
+        return "سلام! روزت بخیر، چطور می‌تونم کمکت کنم؟ مشکلی یا درخواستی هست بفرمایید در خدمتم 🙏"
+
+    return None
 
 def should_process_message(text: str) -> bool:
     """
     بررسی اینکه آیا پیام حاوی کلمات کلیدی مربوط به کار هست یا خیر.
-    کلمات از لیست پیش‌فرض و فایل knowledge_base.json به صورت پویا خوانده می‌شوند.
     """
     if not text:
         return False
     
-    # نرمال‌سازی ساده برای بررسی دقیق‌تر
-    normalized_text = text.lower().replace("‌", " ").replace("آ", "ا") # حذف نیم‌فاصله و یکسان‌سازی الف
-    # تعویض ی و ک عربی به فارسی جهت افزایش دقت
-    normalized_text = normalized_text.replace("ي", "ی").replace("ك", "ک")
+    normalized_text = normalize_text(text)
     
-    _, extra_kws = get_knowledge_base()
+    data = load_raw_knowledge_base()
+    extra_kws = []
+    for faq in data.get("faq_troubleshooting", []):
+        extra_kws.extend(faq.get("keywords", []))
+    
     combined_keywords = KEYWORDS_FILTER + extra_kws
-    
-    for kw in combined_keywords:
-        # نرمال‌سازی کلمه کلیدی
-        normalized_kw = kw.lower().replace("‌", " ").replace("آ", "ا").replace("ي", "ی").replace("ك", "ک")
-        if normalized_kw in normalized_text:
-            return True
-            
-    return False
+    return match_any_keyword(combined_keywords, normalized_text)
 
 # کلاینت هوش مصنوعی
 client_ai = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -491,51 +569,47 @@ async def health_check():
         "gemini_configured": client_ai is not None
     }
 
-SYSTEM_PROMPT = """
-You are an expert IT Administrator managing school and office tech infrastructure.
-You reply to users directly in friendly, conversational Persian (فارسی خودمونی، گرم و فنی) as the IT lead.
-Current local time: Gregorian: {current_date} ({day_name}) | Solar Hijri (تقویم شمسی): {shamsi_date} ({shamsi_day_name}) | Timezone: {timezone}.
+SYSTEM_PROMPT = """You are an expert IT Administrator managing school and office infrastructure.
+Reply in friendly, conversational Persian (فارسی خودمونی، گرم و فنی).
+Time: Gregorian: {current_date} ({day_name}) | Shamsi: {shamsi_date} ({shamsi_day_name}) | Timezone: {timezone}.
 
 {knowledge_base}
 
-### Task & Meeting Extraction Rules:
-- If date or time is missing/vague ("سه‌شنبه جلسه بذاریم"):
-  - Set `type="ask_clarification"`: "سلام! چه ساعتی برات مناسب‌تره بذاریمش تو تقویم؟"
-- If exact date/time is mentioned:
-  - Set `type="task"`, calculate ISO datetime, default duration: 30 mins.
-  - Notice user's input might refer to Solar Hijri dates or Persian weekdays. Match them using the current Shamsi and Gregorian dates provided.
-  - بسیار مهم در مورد پاسخ به کاربر (reply_to_user): وقتی type="task" است، هرگز به کاربر نگویید «جلسه ثبت شد» یا «در تقویم گذاشتم». همچنین اصلاً رسمی و اداری صحبت نکنید (از عبارات خشک مثل «درخواست شما ثبت شد و به مسئول ارسال شد» استفاده نکنید).
-  - کاملاً دوستانه، خودمونی و کوتاه بگویید که پیامش رو دیدید و بگذارید تقویم/برنامه رو چک کنید و زود بهش خبر می‌دید.
-  - نمونه‌های پاسخ خودمونی reply_to_user:
-    * "سلام! بذار تقویمم رو چک کنم، اوکی بود بهت خبر می‌دم."
-    * "سلام! بذار برنامه‌م رو چک کنم بهت خبر می‌دم حتماً."
-    * "سلام، حله! فقط بذار تقویم رو نگاه کنم تداخل نداشته باشم، زود بهت خبرش رو می‌دم."
+### Rules:
+1. Meetings/Tasks:
+- Missing/vague time: type="ask_clarification", ask time friendly.
+- Exact time mentioned: type="task", ISO datetime, default duration 30m. In reply_to_user, NEVER say "ثبت شد" (never say it is booked). Say casually that you saw the message and will check the calendar and let them know.
+2. Technical Support:
+- Follow technical guides if provided. If unresolved or unknown: type="escalate", notify_admin=true.
+3. Chit-Chat / Greetings / Ignorable:
+- type="ignore", reply_to_user=null.
 
-### General Ignore Rules:
-- Pure greetings ("سلام خسته نباشی", "ممنون"), stickers, casual chit-chat -> Set `type="ignore"`.
-
-### Strict JSON Output Format:
+### Strict JSON Output:
 Return ONLY valid JSON matching this schema:
 {{
   "type": "faq" | "task" | "ask_clarification" | "escalate" | "ignore",
-  "reply_to_user": "Technical yet friendly Persian response, or null if ignore",
+  "reply_to_user": "Technical yet friendly Persian response or null",
   "notify_admin": true | false,
-  "admin_notification_text": "Short Persian alert describing what to check manually, or null",
+  "admin_notification_text": "Short Persian alert for admin or null",
   "calendar_event": {{
-      "summary": "Meeting or task title",
+      "summary": "Meeting title",
       "start_time": "YYYY-MM-DDTHH:MM:SS",
       "end_time": "YYYY-MM-DDTHH:MM:SS",
       "description": "Details"
   }}
-}}
-"""
+}}"""
 
-def _generate_gemini_content(contents: str) -> tuple[str, int, int, int]:
-    """اجرای همگام فراخوانی مدل جمنای در ترد مجزا"""
+def _generate_gemini_content(contents: str, system_instruction: str = None) -> tuple[str, int, int, int]:
+    """اجرای همگام فراخوانی مدل جمنای در ترد مجزا با تفکیک دستورالعمل سیستم جهت کشینگ بهینه"""
+    from google.genai import types
+    config = types.GenerateContentConfig(
+        response_mime_type='application/json',
+        system_instruction=system_instruction
+    )
     response = client_ai.models.generate_content(
         model=GEMINI_MODEL,
         contents=contents,
-        config={'response_mime_type': 'application/json'}
+        config=config
     )
     prompt_tokens = 0
     candidate_tokens = 0
@@ -565,9 +639,11 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
         shamsi_date = today_str
         shamsi_day_name = day_name
 
-    kb_text, _ = get_knowledge_base()
+    # تزریق فقط بخش‌های مرتبط پایگاه دانش متناسب با متن کاربر
+    history_user_text = " ".join([m.get("content", "") for m in (history or []) if m.get("role") == "user"])
+    kb_text = get_relevant_knowledge_base(user_text, history_user_text)
 
-    prompt = SYSTEM_PROMPT.format(
+    sys_instruction = SYSTEM_PROMPT.format(
         current_date=today_str,
         day_name=day_name,
         shamsi_date=shamsi_date,
@@ -579,18 +655,25 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
     formatted_history = ""
     if history:
         history_lines = []
-        for msg in history:
-            sender = "کاربر" if msg.get("role") == "user" else "دستیار (شما)"
-            history_lines.append(f"{sender}: {msg.get('content', '')}")
-        formatted_history = "\n### سوابق گفتگوی قبلی با این کاربر (جهت پیگیری مکالمه):\n" + "\n".join(history_lines) + "\n"
+        # فقط ۳ پیام اخیر مکالمه با خلاصه کردن پاسخ‌های بلند قبلی
+        for msg in history[-3:]:
+            role = msg.get("role")
+            sender = "کاربر" if role == "user" else "دستیار"
+            content = msg.get("content", "")
+            if role != "user" and len(content) > 120:
+                content = content[:120] + "..."
+            history_lines.append(f"{sender}: {content}")
+        formatted_history = "### سوابق گفتگوی قبلی:\n" + "\n".join(history_lines) + "\n\n"
 
-    full_contents = f"{prompt}\n{formatted_history}\nپیام جدید کاربر:\n{user_text}"
+    full_contents = f"{formatted_history}پیام کاربر:\n{user_text}"
 
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
-            # اجرای غیرمسدودکننده در Worker Thread
-            response_text, p_tok, c_tok, t_tok = await asyncio.to_thread(_generate_gemini_content, full_contents)
+            # اجرای غیرمسدودکننده در Worker Thread با system_instruction مجزا
+            response_text, p_tok, c_tok, t_tok = await asyncio.to_thread(
+                _generate_gemini_content, full_contents, sys_instruction
+            )
             record_api_usage(GEMINI_MODEL, p_tok, c_tok, t_tok)
             result = json.loads(response_text)
             # اعتبارسنجی حداقلی ساختار پاسخ جمنای
@@ -815,6 +898,19 @@ async def telegram_webhook(request: Request):
         if not text:
             return {"ok": True}
 
+        # ⚡ اولویت ۰: بررسی پاسخ فوری محلی با ۰ توکن (احوالپرسی خالی، تشکر، تایید، خداحافظی)
+        quick_reply = handle_quick_chit_chat(text)
+        if quick_reply:
+            save_chat_message(user_chat_id, "user", text)
+            await send_telegram_message(
+                chat_id=user_chat_id,
+                text=quick_reply,
+                business_connection_id=b_conn_id
+            )
+            save_chat_message(user_chat_id, "model", quick_reply)
+            logging.info(f"⚡ پاسخ فوری محلی به {sender_name} با ۰ توکن ارسال شد: {quick_reply}")
+            return {"ok": True}
+
         # بررسی اینکه آیا کاربر در حال حاضر در یک جلسه گفتگوی فعال است؟
         is_active = is_user_in_active_session(user_chat_id)
 
@@ -825,8 +921,8 @@ async def telegram_webhook(request: Request):
 
         logging.info(f"📩 پیام جدید از {sender_name} (جلسه فعال: {is_active}، {len(text)} کاراکتر)")
 
-        # دریافت سوابق گفتگو برای آگاهی هوش مصنوعی از پیشینه صحبت‌ها
-        recent_history = get_recent_chat_history(user_chat_id, limit=6)
+        # دریافت سوابق گفتگو برای آگاهی هوش مصنوعی از پیشینه صحبت‌ها (حداکثر ۳ پیام اخیر جهت صرفه‌جویی توکن)
+        recent_history = get_recent_chat_history(user_chat_id, limit=3)
 
         # ثبت پیام کاربر در تاریخچه
         save_chat_message(user_chat_id, "user", text)
