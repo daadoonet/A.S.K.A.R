@@ -171,6 +171,12 @@ def get_relevant_knowledge_base(user_text: str, history_text: str = "") -> str:
         return ""
     return "### Technical Knowledge Base (راهنمای فنی مرتبط):\n" + "\n".join(lines)
 
+BOT_SIGNATURE = "\n🤖"
+
+def bot_msg(text: str) -> str:
+    """اضافه کردن امضای ربات به انتهای پیام‌های ارسالی به کاربران"""
+    return f"{text}{BOT_SIGNATURE}"
+
 def handle_quick_chit_chat(text: str) -> str | None:
     """
     پاسخگویی فوری و محلی با ۰ توکن به احوالپرسی‌های کوتاه، تشکر، تایید و خداحافظی
@@ -195,23 +201,23 @@ def handle_quick_chit_chat(text: str) -> str | None:
     ]
     for p in gratitude_phrases:
         if norm_words == p or norm_words.startswith(p + " ") or norm_words.endswith(" " + p):
-            return "خواهش می‌کنم، اگر مورد دیگه‌ای بود در خدمتم! ارادت 🙏"
+            return bot_msg("خواهش می‌کنم، اگر مورد دیگه‌ای بود در خدمتم! ارادت 🙏")
 
     # بررسی تایید و اختتام
     ack_phrases = ["باشه", "اوکی", "اوکیه", "حله", "چشم", "عالیه", "خیلی خب", "باش", "حتما"]
     if norm_words in ack_phrases:
-        return "ارادت، در خدمتم 🙏"
+        return bot_msg("ارادت، در خدمتم 🙏")
 
     # بررسی خداحافظی و خسته‌نباشید
     farewell_phrases = ["خداحافظ", "خداحافظی", "فعلا", "خسته نباشی", "خسته نباشید", "روز خوش", "شب خوش"]
     for p in farewell_phrases:
         if norm_words == p or norm_words.startswith(p + " "):
-            return "سلامت باشی، روزت خوش! ارادت 🙏"
+            return bot_msg("سلامت باشی، روزت خوش! ارادت 🙏")
 
     # بررسی سلام خالی بدون سوال
     greeting_phrases = ["سلام", "سلام علیکم", "درود", "صبح بخیر", "عصر بخیر", "وقت بخیر", "سلام وقت بخیر"]
     if norm_words in greeting_phrases:
-        return "سلام! روزت بخیر، چطور می‌تونم کمکت کنم؟ مشکلی یا درخواستی هست بفرمایید در خدمتم 🙏"
+        return bot_msg("سلام! روزت بخیر، چطور می‌تونم کمکت کنم؟ مشکلی یا درخواستی هست بفرمایید در خدمتم 🙏")
 
     return None
 
@@ -735,7 +741,7 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
     # در صورت شکست تمامی تلاش‌ها: بازگشت پاسخ جایگزین هوشمند (Graceful Degradation)
     return {
         "type": "fallback",
-        "reply_to_user": "سلام! سیستم موقتاً با کندی مواجه شده، پیامت رو دریافت کردم و در اسرع وقت بهت پاسخ می‌دم. 🙏",
+        "reply_to_user": bot_msg("سلام! سیستم موقتاً با کندی مواجه شده، پیامت رو دریافت کردم و در اسرع وقت بهت پاسخ می‌دم. 🙏"),
         "notify_admin": True,
         "admin_notification_text": f"خطا در ارتباط با سرویس هوش مصنوعی جمنای پس از {max_retries} بار تلاش: {last_err}",
         "calendar_event": None
@@ -993,7 +999,7 @@ async def telegram_webhook(request: Request):
         
         # ۱. ارسال پاسخ خودکار به کاربر (در صورت وجود)
         if analysis.get("reply_to_user"):
-            user_reply_text = analysis["reply_to_user"]
+            user_reply_text = bot_msg(analysis["reply_to_user"])
             await send_telegram_message(
                 chat_id=user_chat_id,
                 text=user_reply_text,
@@ -1002,7 +1008,7 @@ async def telegram_webhook(request: Request):
             save_chat_message(user_chat_id, "model", user_reply_text)
             logging.info(f"📤 پاسخ به کاربر ارسال و در تاریخچه ذخیره شد: {user_reply_text}")
 
-        # ۲. پیشنهاد تسک برای تقویم گوگل (ارسال به ادمین همراه با دکمه‌های تایید و رد)
+        # ۲. پیشنهاد تسک برای تقویم گوگل (ارسال به ادمین همراه با دکمه‌های تایید، رد و نادیده گرفتن)
         if analysis.get("type") == "task" and analysis.get("calendar_event"):
             ev = analysis["calendar_event"]
             event_id = f"ev_{uuid.uuid4().hex[:12]}"
@@ -1024,10 +1030,15 @@ async def telegram_webhook(request: Request):
             )
             
             keyboard = {
-                "inline_keyboard": [[
-                    {"text": "✅ تایید و ثبت در تقویم", "callback_data": f"approve:{event_id}"},
-                    {"text": "❌ رد", "callback_data": f"reject:{event_id}"}
-                ]]
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ تایید و ثبت در تقویم", "callback_data": f"approve:{event_id}"},
+                        {"text": "❌ رد", "callback_data": f"reject:{event_id}"}
+                    ],
+                    [
+                        {"text": "🙈 نادیده گرفتن", "callback_data": f"ignore:{event_id}"}
+                    ]
+                ]
             }
             await send_telegram_message(chat_id=ADMIN_CHAT_ID, text=confirm_text, reply_markup=keyboard)
             logging.info(f"🔔 درخواست تایید تسک با دکمه برای ادمین ارسال شد (ID: {event_id}).")
@@ -1185,7 +1196,7 @@ async def telegram_webhook(request: Request):
                         target_b_conn = ev.get("business_connection_id")
                         summary_title = ev.get("summary", "جلسه")
                         if target_user_id:
-                            user_confirm_msg = f"سلام مجدد! تایم «{summary_title}» اوکی شد و گذاشتمش تو تقویم. ✅📅"
+                            user_confirm_msg = bot_msg(f"سلام مجدد! تایم «{summary_title}» اوکی شد و گذاشتمش تو تقویم. ✅📅")
                             await send_telegram_message(
                                 chat_id=target_user_id,
                                 text=user_confirm_msg,
@@ -1220,7 +1231,7 @@ async def telegram_webhook(request: Request):
                     target_b_conn = ev.get("business_connection_id")
                     summary_title = ev.get("summary", "جلسه")
                     if target_user_id:
-                        user_reject_msg = f"سلام! متاسفانه برای تایم «{summary_title}» تداخل دارم و امکانش نیست. بی زحمت یه تایم دیگه پیشنهاد بده با هم هماهنگ کنیم. 🙏"
+                        user_reject_msg = bot_msg(f"سلام! متاسفانه برای تایم «{summary_title}» تداخل دارم و امکانش نیست. بی زحمت یه تایم دیگه پیشنهاد بده با هم هماهنگ کنیم. 🙏")
                         await send_telegram_message(
                             chat_id=target_user_id,
                             text=user_reject_msg,
@@ -1242,6 +1253,23 @@ async def telegram_webhook(request: Request):
                     await send_telegram_message(chat_id=ADMIN_CHAT_ID, text="❌ رویداد رد شد.")
                 await answer_callback_query(cb_id, text="رویداد رد شد و به کاربر اطلاع داده شد ❌")
                 logging.info(f"🚫 رویداد رد شد (ID: {event_id}).")
+
+            elif action == "ignore":
+                # نادیده گرفتن — رویداد حذف می‌شود، بدون ارسال پیام به کاربر
+                if not ADMIN_CHAT_ID or str(sender_id) != str(ADMIN_CHAT_ID):
+                    await answer_callback_query(cb_id, text="⛔ دسترسی غیرمجاز!")
+                    return {"ok": True}
+                delete_pending_event(event_id)
+                updated_text = f"{original_text}\n\n🙈 این درخواست نادیده گرفته شد."
+                if cb_msg_id:
+                    await edit_telegram_message(
+                        chat_id=cb_chat_id,
+                        message_id=cb_msg_id,
+                        text=updated_text,
+                        reply_markup={"inline_keyboard": []}
+                    )
+                await answer_callback_query(cb_id, text="درخواست نادیده گرفته شد 🙈")
+                logging.info(f"🙈 رویداد نادیده گرفته شد (ID: {event_id}).")
         else:
             await answer_callback_query(cb_id)
 
