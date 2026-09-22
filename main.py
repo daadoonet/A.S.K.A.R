@@ -323,6 +323,21 @@ def init_db():
         conn.commit()
     logging.info("📦 پایگاه داده رویدادها، تاریخچه گفتگو و تنظیمات سیستم آماده‌سازی شد.")
 
+
+# لیست مدل‌های عمومی جمنای قابل انتخاب توسط ادمین
+AVAILABLE_GEMINI_MODELS = [
+    ("gemini-3.8-flash",         "🆕⚡ Gemini 3.8 Flash (پیشنهادی - هوشمندترین Flash)"),
+    ("gemini-3.7-flash",         "🔥 Gemini 3.7 Flash (کدنویسی و اتوماسیون)"),
+    ("gemini-3.6-flash",         "⚡ Gemini 3.6 Flash (سریع و همه‌منظوره)"),
+    ("gemini-3.5-flash",         "💨 Gemini 3.5 Flash (سبک - توان بالا)"),
+    ("gemini-3.5-flash-lite",    "🪶 Gemini 3.5 Flash-Lite (سریع‌ترین و ارزان‌ترین)"),
+    ("gemini-3.1-flash-lite",    "💰 Gemini 3.1 Flash-Lite (کم‌مصرف‌ترین)"),
+    ("gemini-3.1-pro-preview",   "🧠 Gemini 3.1 Pro (قوی‌ترین - Preview)"),
+    ("gemini-2.5-flash",         "🔷 Gemini 2.5 Flash (نسل قبل)"),
+    ("gemini-2.5-flash-lite",    "🔹 Gemini 2.5 Flash-Lite (نسل قبل - سبک)"),
+    ("gemini-2.5-pro",           "🔶 Gemini 2.5 Pro (نسل قبل - قوی)"),
+]
+
 def get_bot_active_status() -> bool:
     """بررسی وضعیت روشن یا خاموش بودن پاسخگویی خودکار ربات"""
     try:
@@ -335,6 +350,32 @@ def get_bot_active_status() -> bool:
     except Exception as e:
         logging.error(f"❌ خطا در خواندن وضعیت ربات: {e}")
     return True
+
+def get_active_gemini_model() -> str:
+    """خواندن مدل جمنای انتخابی ادمین از دیتابیس (با fallback به متغیر محیطی)"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_settings WHERE key = 'gemini_model'")
+            row = cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        logging.error(f"❌ خطا در خواندن مدل جمنای از دیتابیس: {e}")
+    return GEMINI_MODEL
+
+def set_active_gemini_model(model: str):
+    """ذخیره مدل جمنای انتخابی ادمین در دیتابیس"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO bot_settings (key, value, updated_at)
+            VALUES ('gemini_model', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """, (model,))
+        conn.commit()
+    logging.info(f"🤖 مدل جمنای توسط ادمین تغییر یافت: {model}")
+
 
 def set_bot_active_status(active: bool):
     """تنظیم وضعیت فعال یا متوقف بودن پاسخگویی خودکار ربات"""
@@ -599,15 +640,16 @@ Return ONLY valid JSON matching this schema:
   }}
 }}"""
 
-def _generate_gemini_content(contents: str, system_instruction: str = None) -> tuple[str, int, int, int]:
+def _generate_gemini_content(contents: str, system_instruction: str = None, model: str = None) -> tuple[str, int, int, int]:
     """اجرای همگام فراخوانی مدل جمنای در ترد مجزا با تفکیک دستورالعمل سیستم جهت کشینگ بهینه"""
     from google.genai import types
+    active_model = model or get_active_gemini_model()
     config = types.GenerateContentConfig(
         response_mime_type='application/json',
         system_instruction=system_instruction
     )
     response = client_ai.models.generate_content(
-        model=GEMINI_MODEL,
+        model=active_model,
         contents=contents,
         config=config
     )
@@ -618,7 +660,7 @@ def _generate_gemini_content(contents: str, system_instruction: str = None) -> t
         prompt_tokens = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
         candidate_tokens = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
         total_tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
-    return response.text, prompt_tokens, candidate_tokens, total_tokens
+    return response.text, prompt_tokens, candidate_tokens, total_tokens, active_model
 
 async def call_gemini(user_text: str, history: list[dict] = None, max_retries: int = 3) -> dict:
     if not client_ai:
@@ -671,10 +713,10 @@ async def call_gemini(user_text: str, history: list[dict] = None, max_retries: i
     for attempt in range(1, max_retries + 1):
         try:
             # اجرای غیرمسدودکننده در Worker Thread با system_instruction مجزا
-            response_text, p_tok, c_tok, t_tok = await asyncio.to_thread(
+            response_text, p_tok, c_tok, t_tok, active_model = await asyncio.to_thread(
                 _generate_gemini_content, full_contents, sys_instruction
             )
-            record_api_usage(GEMINI_MODEL, p_tok, c_tok, t_tok)
+            record_api_usage(active_model, p_tok, c_tok, t_tok)
             result = json.loads(response_text)
             # اعتبارسنجی حداقلی ساختار پاسخ جمنای
             if not isinstance(result, dict) or "type" not in result:
@@ -775,12 +817,23 @@ def build_admin_panel_markup(is_active: bool) -> dict:
         "inline_keyboard": [
             [{"text": toggle_text, "callback_data": "admin:toggle"}],
             [{"text": "📊 آمار پیام‌ها و مصرف API امروز", "callback_data": "admin:stats"}],
+            [{"text": "🤖 تغییر مدل هوش مصنوعی", "callback_data": "admin:model"}],
             [
                 {"text": "📄 دریافت فایل لاگ", "callback_data": "admin:logs"},
                 {"text": "🔄 بروزرسانی پنل", "callback_data": "admin:refresh"}
             ]
         ]
     }
+
+def build_model_selection_markup(current_model: str) -> dict:
+    """ساخت inline keyboard انتخاب مدل جمنای برای ادمین"""
+    rows = []
+    for model_id, model_label in AVAILABLE_GEMINI_MODELS:
+        prefix = "✅ " if model_id == current_model else ""
+        rows.append([{"text": f"{prefix}{model_label}", "callback_data": f"admin:setmodel:{model_id}"}])
+    rows.append([{"text": "🔙 بازگشت به پنل", "callback_data": "admin:refresh"}])
+    return {"inline_keyboard": rows}
+
 
 def format_admin_stats_text() -> str:
     """قالب‌بندی گزارش آماری روزانه برای نمایش به ادمین"""
@@ -809,9 +862,13 @@ def format_admin_stats_text() -> str:
 def format_admin_panel_text(is_active: bool) -> str:
     """قالب‌بندی متن پنل مدیریت ادمین (حذف تکرار)"""
     status_text = "🟢 **ربات فعال است** و پیام‌های کاربران را پاسخ می‌دهد." if is_active else "🔴 **ربات متوقف است** (حالت سکوت/تعمیرات)."
+    current_model = get_active_gemini_model()
+    # پیدا کردن برچسب فارسی مدل انتخابی
+    model_label = next((lbl for mid, lbl in AVAILABLE_GEMINI_MODELS if mid == current_model), current_model)
     return (
         f"👑 **پنل مدیریت ربات هوشمند A.S.K.A.R**\n\n"
-        f"وضعیت کنونی: {status_text}\n\n"
+        f"وضعیت کنونی: {status_text}\n"
+        f"🤖 مدل هوش مصنوعی فعال: `{model_label}`\n\n"
         f"از دکمه‌های زیر برای کنترل و دریافت گزارشات استفاده فرمایید:"
     )
 
@@ -1047,6 +1104,41 @@ async def telegram_webhook(request: Request):
             elif action == "logs":
                 await answer_callback_query(cb_id, text="📄 در حال ارسال فایل لاگ...")
                 await send_telegram_document(chat_id=cb_chat_id, file_path=os.path.join(BASE_DIR, "bot_activity.log"), caption="📄 فایل لاگ سرور bot_activity.log")
+            elif action == "model":
+                # نمایش لیست مدل‌های جمنای برای انتخاب
+                current_model = get_active_gemini_model()
+                model_panel_text = (
+                    f"🤖 **انتخاب مدل هوش مصنوعی**\n\n"
+                    f"مدل فعلی: `{current_model}`\n\n"
+                    f"یک مدل را از لیست زیر انتخاب کنید:"
+                )
+                if cb_msg_id:
+                    await edit_telegram_message(
+                        chat_id=cb_chat_id,
+                        message_id=cb_msg_id,
+                        text=model_panel_text,
+                        reply_markup=build_model_selection_markup(current_model)
+                    )
+                await answer_callback_query(cb_id)
+            elif action.startswith("setmodel:"):
+                # ذخیره مدل انتخابی ادمین
+                chosen_model = action.split(":", 1)[1]
+                valid_model_ids = [mid for mid, _ in AVAILABLE_GEMINI_MODELS]
+                if chosen_model not in valid_model_ids:
+                    await answer_callback_query(cb_id, text="⛔ مدل انتخابی معتبر نیست!")
+                else:
+                    set_active_gemini_model(chosen_model)
+                    model_label = next((lbl for mid, lbl in AVAILABLE_GEMINI_MODELS if mid == chosen_model), chosen_model)
+                    await answer_callback_query(cb_id, text=f"✅ مدل به {model_label} تغییر یافت")
+                    # برگشت به پنل اصلی با مدل آپدیت شده
+                    is_active = get_bot_active_status()
+                    if cb_msg_id:
+                        await edit_telegram_message(
+                            chat_id=cb_chat_id,
+                            message_id=cb_msg_id,
+                            text=format_admin_panel_text(is_active),
+                            reply_markup=build_admin_panel_markup(is_active)
+                        )
             elif action == "refresh":
                 is_active = get_bot_active_status()
                 if cb_msg_id:
@@ -1058,6 +1150,7 @@ async def telegram_webhook(request: Request):
                     )
                 await answer_callback_query(cb_id, text="وضعیت بروزرسانی شد ✅")
             return {"ok": True}
+
         
         if ":" in cb_data:
             action, event_id = cb_data.split(":", 1)
